@@ -66,7 +66,7 @@ app.get("/", (req, res) => {
 
 });
 
-app.get("api/markets", async (req, res) => {
+app.get("/api/markets", async (req, res) => {
 
   try {
 
