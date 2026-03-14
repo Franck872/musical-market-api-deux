@@ -61,7 +61,7 @@ app.get("/", (req, res) => {
   res.json({
     service: "Musical Market API",
     status: "running",
-    endpoint: "api/markets"
+    endpoint: "/api/markets"
   });
 
 });
