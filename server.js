@@ -61,12 +61,12 @@ app.get("/", (req, res) => {
   res.json({
     service: "Musical Market API",
     status: "running",
-    endpoint: "/markets"
+    endpoint: "api/markets"
   });
 
 });
 
-app.get("/markets", async (req, res) => {
+app.get("api/markets", async (req, res) => {
 
   try {
 
