@@ -7,6 +7,10 @@ import { redis } from "./redis.js";
 import { buildMarkets } from "./marketBuilder.js";
 import { startWebsocket, broadcast } from "./websocket.js";
 
+import { updateViews, fetchVideos } from "./fetcher.js";
+import { generateEvents } from "./generator.js";
+import { resolveEvents } from "./resolver.js";
+
 dotenv.config();
 
 const app = express();
@@ -35,7 +39,7 @@ async function updateMarkets() {
       "markets:active",
       json,
       "EX",
-      60
+      30
     );
 
     await redis.publish("markets:update", json);
@@ -52,9 +56,28 @@ async function updateMarkets() {
 
 }
 
-setInterval(updateMarkets, 15000);
+/* ---------------------- */
+/* MOTEURS DU BACKEND */
+/* ---------------------- */
+
+setInterval(updateMarkets, 15000);      // API cache
+setInterval(updateViews, 60000);        // fetcher vues
+setInterval(resolveEvents, 60000);      // calcul marchés
+setInterval(generateEvents, 600000);    // créer événements
+
+// recherche YouTube une fois par jour
+setInterval(fetchVideos, 86400000);
+
+/* lancement immédiat */
 
 updateMarkets();
+updateViews();
+resolveEvents();
+generateEvents();
+
+/* ---------------------- */
+/* ROUTES API */
+/* ---------------------- */
 
 app.get("/", (req, res) => {
 
@@ -67,20 +90,23 @@ app.get("/", (req, res) => {
 });
 
 app.get("/api/markets", async (req, res) => {
+
   try {
+
     const data = await redis.get("markets:active");
 
     if (!data) {
+
       return res.json({
         timestamp: Date.now(),
         active_count: 0,
         events: []
       });
+
     }
 
     const parsed = JSON.parse(data);
-    
-    res.setHeader("Content-Type", "application/json");
+
     res.json({
       timestamp: parsed.timestamp,
       active_count: parsed.active_events,
@@ -88,11 +114,15 @@ app.get("/api/markets", async (req, res) => {
     });
 
   } catch (err) {
+
     console.error("❌ Markets route error:", err);
+
     res.status(500).json({
       error: "markets_fetch_failed"
     });
+
   }
+
 });
 
 server.listen(PORT, () => {
