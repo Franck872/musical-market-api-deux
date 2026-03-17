@@ -1,83 +1,87 @@
 // buildMarkets.js
 import { pool } from "./db.js";
 
-// ------------------------------------------------------------
-// Fonction utilitaire : calcul des probabilités et cotes
-// ------------------------------------------------------------
-function calculateOverUnder(event) {
-  const now = Date.now();
-  const deadline = new Date(event.deadline).getTime();
-  const totalTime = deadline - new Date(event.created_at ?? now - 3600000).getTime(); // fallback 1h
-  const remainingTime = Math.max(deadline - now, 0);
-  const elapsedPercent = 1 - remainingTime / (totalTime || 1);
-
-  const current = Number(event.current_views ?? 0);
-  const target = Number(event.target_views ?? current * 2 || 1000);
-
-  const speed = Number(event.speed ?? 0);
-  const trend = Number(event.trend ?? 0);
-
-  // estimation de probabilité pour atteindre target
-  let overProb = Math.min(1, current / target + speed / 1000 + trend / target + remainingTime / (totalTime || 1));
-  let underProb = 1 - overProb;
-
-  // blocage selon règle
-  const overBlocked = overProb >= 0.7 || (overProb >= 0.5 && elapsedPercent > 0.25);
-  const underBlocked = underProb >= 0.7 || (underProb >= 0.5 && elapsedPercent > 0.25);
-
-  // distribution des cotes (somme des cotes = 3)
-  const totalOdds = 3;
-  const overOdds = overBlocked ? 0 : (overProb > 0 ? totalOdds * (underProb / (overProb + underProb)) : totalOdds / 2);
-  const underOdds = underBlocked ? 0 : (underProb > 0 ? totalOdds * (overProb / (overProb + underProb)) : totalOdds / 2);
-
-  return [
-    { type: "Over", probability: Number(overProb.toFixed(2)), odds: Number(overOdds.toFixed(2)), blocked: overBlocked },
-    { type: "Under", probability: Number(underProb.toFixed(2)), odds: Number(underOdds.toFixed(2)), blocked: underBlocked }
-  ];
+// fonction utilitaire pour calculer des cotes réalistes
+function calculateOdds(current, min, max, speed = 0) {
+  const distance = Math.max(min - current, 0);
+  const base = 1 + (distance / (max - min + 1 || 1)) * 5; // jamais division par 0
+  // ajustement selon vitesse: si speed rapide, cote plus faible
+  const adjusted = speed > 0 ? base / Math.min(speed / 1000, 3) : base;
+  return Math.max(1.01, Number(adjusted.toFixed(2)));
 }
 
-// ------------------------------------------------------------
-// Fonction principale : construction des marchés
-// ------------------------------------------------------------
+// Fonction principale
 export async function buildMarkets() {
   const client = await pool.connect();
 
   try {
     const res = await client.query(`
-      SELECT id, title, external_id AS video_id,
-             current_views, views_n1, views_n2,
-             target_views, expected_speed AS speed,
-             deadline, created_at
-      FROM events
-      WHERE status='active'
-      ORDER BY deadline ASC
+      SELECT
+        e.id,
+        e.title,
+        e.external_id AS video_id,
+        e.current_views,
+        e.views_n1,
+        e.views_n2,
+        e.target_views,
+        e.expected_speed AS speed,
+        e.deadline,
+        i.idx AS interval_index,
+        i.min_value,
+        i.max_value,
+        o.probability,
+        o.odds,
+        o.blocked
+      FROM events e
+      LEFT JOIN intervals i ON i.event_id = e.id
+      LEFT JOIN offers o ON o.interval_id = i.id
+      WHERE e.status = 'active'
+      ORDER BY e.deadline ASC, i.idx ASC
     `);
 
-    const markets = res.rows.map(ev => {
-      const current = Number(ev.current_views ?? 0);
-      const targetRaw = Number(ev.target_views ?? current * 2 || 1000);
-      const target = Math.max(current + 10, targetRaw); // minimum +10 pour éviter 0
+    const marketsMap = {};
 
-      // calcul des offres Over/Under
-      const offers = calculateOverUnder({
-        ...ev,
-        current_views: current,
-        target_views: target,
-        trend: current - Number(ev.views_n1 ?? 0),
-        speed: Number(ev.speed ?? 0)
-      });
+    for (const row of res.rows) {
+      // création de l'événement
+      if (!marketsMap[row.id]) {
+        const currentViews = Number(row.current_views ?? 0);
+        const targetViewsRaw = Number(row.target_views ?? currentViews * 2 || 1000);
+        const targetViews = Math.max(currentViews + 10, targetViewsRaw); // minimum +10 pour pas zéro
 
-      return {
-        id: ev.id,
-        title: ev.title,
-        video_id: ev.video_id,
-        current_views: current,
-        target_views: target,
-        deadline: ev.deadline,
-        timestamp: Date.now(),
-        offers
-      };
-    });
+        marketsMap[row.id] = {
+          id: row.id,
+          title: row.title,
+          video_id: row.video_id,
+          current_views: currentViews,
+          views_n1: Number(row.views_n1 ?? 0),
+          views_n2: Number(row.views_n2 ?? 0),
+          speed: Number(row.speed ?? 0),
+          trend: (Number(row.current_views ?? 0) - Number(row.views_n1 ?? 0)),
+          target_views: targetViews,
+          deadline: row.deadline,
+          offers: []
+        };
+      }
+
+      // ajout des offres si elles existent
+      if (row.interval_index !== null) {
+        const ev = marketsMap[row.id];
+
+        // si la cote n'est pas définie, on calcule
+        const odds = Number(row.odds ?? calculateOdds(ev.current_views, row.min_value, row.max_value, ev.speed));
+
+        ev.offers.push({
+          interval_index: row.interval_index,
+          min_views: Number(row.min_value),
+          max_views: Number(row.max_value),
+          probability: Number(row.probability ?? 0.1),
+          odds: odds,
+          blocked: row.blocked ?? false
+        });
+      }
+    }
+
+    const markets = Object.values(marketsMap);
 
     return {
       timestamp: Date.now(),
